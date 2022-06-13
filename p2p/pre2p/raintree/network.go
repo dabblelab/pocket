@@ -204,11 +204,12 @@ func (n *rainTreeNetwork) HandleNetworkData(data []byte) ([]byte, error) {
 	if rainTreeMsg.Level > 0 {
 		log.Println("Message hash=", rainTreeMsg.Hash)
 		hashString := fmt.Sprintf("%x", rainTreeMsg.Hash)
+		blockHeight := fmt.Sprintf("%d", n.GetBus().GetConsensusModule().GetBlockHeight())
 		n.
 			GetBus().
 			GetTelemetryModule().
 			GetGaugeVec("broadcast_msg_redundancy_total_per_block").
-			WithLabelValues(hashString).
+			WithLabelValues(hashString, blockHeight).
 			Inc()
 
 		n.GetBus().

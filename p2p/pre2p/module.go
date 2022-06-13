@@ -104,7 +104,7 @@ func (m *p2pModule) Start() error {
 			"p2p",
 			"broadcast_msg_redundancy_total_per_block",
 			"the counter to track the number of messages received per block",
-			[]string{"message_hash"},
+			[]string{"message_hash", "block"},
 		)
 
 	m.network.SetBus(m.GetBus())

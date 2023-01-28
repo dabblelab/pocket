@@ -3,80 +3,69 @@ package shared
 import (
 	"log"
 
-	"github.com/pokt-network/pocket/p2p/pre2p"
-	"github.com/pokt-network/pocket/persistence"
-	"github.com/pokt-network/pocket/shared/config"
-	cryptoPocket "github.com/pokt-network/pocket/shared/crypto"
-	"github.com/pokt-network/pocket/utility"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
-
 	"github.com/pokt-network/pocket/consensus"
-	"github.com/pokt-network/pocket/persistence/pre_persistence"
-	"github.com/pokt-network/pocket/shared/types"
-	typesGenesis "github.com/pokt-network/pocket/shared/types/genesis"
-
+	"github.com/pokt-network/pocket/logger"
+	"github.com/pokt-network/pocket/p2p"
+	"github.com/pokt-network/pocket/persistence"
+	"github.com/pokt-network/pocket/rpc"
+	cryptoPocket "github.com/pokt-network/pocket/shared/crypto"
+	"github.com/pokt-network/pocket/shared/messaging"
 	"github.com/pokt-network/pocket/shared/modules"
+	"github.com/pokt-network/pocket/telemetry"
+	"github.com/pokt-network/pocket/utility"
 )
 
-var _ modules.Module = &Node{}
+const (
+	mainModuleName = "main"
+)
 
 type Node struct {
-	bus modules.Bus
-
-	Address cryptoPocket.Address
+	bus        modules.Bus
+	p2pAddress cryptoPocket.Address
 }
 
-func Create(cfg *config.Config) (n *Node, err error) {
-	// TODO(design): initialize the state singleton until we have a proper solution for this.
-	_ = typesGenesis.GetNodeState(cfg)
+func NewNodeWithP2PAddress(address cryptoPocket.Address) *Node {
+	return &Node{p2pAddress: address}
+}
 
-	// TODO(drewsky): The module is initialized to run background processes during development
-	// to make sure it's part of the node's lifecycle, but is not referenced YET byt the app specific
-	// bus.
-	if _, err := persistence.Create(cfg); err != nil {
-		return nil, err
+func CreateNode(bus modules.Bus) (modules.Module, error) {
+	return new(Node).Create(bus)
+}
+
+func (m *Node) Create(bus modules.Bus) (modules.Module, error) {
+	for _, mod := range []func(modules.Bus) (modules.Module, error){
+		persistence.Create,
+		utility.Create,
+		consensus.Create,
+		telemetry.Create,
+		logger.Create,
+		rpc.Create,
+		p2p.Create,
+	} {
+		if _, err := mod(bus); err != nil {
+			return nil, err
+		}
 	}
 
-	// TODO(drewsky): deprecate pre-persistence
-	prePersistenceMod, err := pre_persistence.Create(cfg)
-	if err != nil {
-		return nil, err
-	}
-	// TODO(derrandz): Replace with real P2P module
-	// p2pMod, err := p2p.Create(cfg)
-	pre2pMod, err := pre2p.Create(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO(andrew): Replace with real Utility module
-	utilityMod, err := utility.Create(cfg)
-	// mockedUtilityMod, err := utility.CreateMockedModule(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	consensusMod, err := consensus.Create(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	bus, err := CreateBus(prePersistenceMod, pre2pMod, utilityMod, consensusMod)
+	addr, err := bus.GetP2PModule().GetAddress()
 	if err != nil {
 		return nil, err
 	}
 
 	return &Node{
-		bus:     bus,
-		Address: cfg.PrivateKey.Address(),
+		bus:        bus,
+		p2pAddress: addr,
 	}, nil
 }
 
 func (node *Node) Start() error {
-	log.Println("Starting pocket node...")
+	log.Println("About to start pocket node modules...")
 
-	// NOTE: Order of module startup here matters.
+	// IMPORTANT: Order of module startup here matters
+
+	if err := node.GetBus().GetTelemetryModule().Start(); err != nil {
+		return err
+	}
 
 	if err := node.GetBus().GetPersistenceModule().Start(); err != nil {
 		return err
@@ -94,15 +83,24 @@ func (node *Node) Start() error {
 		return err
 	}
 
-	// TODO(olshansky): discuss if we need a special type/event for this.
-	signalNodeStartedEvent := &types.PocketEvent{Topic: types.PocketTopic_POCKET_NODE_TOPIC, Data: nil}
+	if err := node.GetBus().GetRPCModule().Start(); err != nil {
+		return err
+	}
+
+	// The first event signaling that the node has started
+	signalNodeStartedEvent, err := messaging.PackMessage(&messaging.NodeStartedEvent{})
+	if err != nil {
+		return err
+	}
 	node.GetBus().PublishEventToBus(signalNodeStartedEvent)
 
-	// While loop lasting throughout the entire lifecycle of the node.
+	log.Println("About to start pocket node main loop...")
+
+	// While loop lasting throughout the entire lifecycle of the node to handle asynchronous events
 	for {
 		event := node.GetBus().GetBusEvent()
 		if err := node.handleEvent(event); err != nil {
-			log.Println("Error handling event: ", err)
+			log.Println("Error handling event:", err)
 		}
 	}
 }
@@ -123,36 +121,53 @@ func (m *Node) GetBus() modules.Bus {
 	return m.bus
 }
 
-func (node *Node) handleEvent(event *types.PocketEvent) error {
-	switch event.Topic {
-	case types.PocketTopic_CONSENSUS_MESSAGE_TOPIC:
-		return node.GetBus().GetConsensusModule().HandleMessage(event.Data)
-	case types.PocketTopic_DEBUG_TOPIC:
-		return node.handleDebugEvent(event.Data)
+func (node *Node) handleEvent(message *messaging.PocketEnvelope) error {
+	contentType := message.GetContentType()
+	switch contentType {
+	case messaging.NodeStartedEventType:
+		log.Println("[NOOP] Received NodeStartedEvent")
+	case consensus.HotstuffMessageContentType:
+		return node.GetBus().GetConsensusModule().HandleMessage(message.Content)
+	case utility.TransactionGossipMessageContentType:
+		return node.GetBus().GetUtilityModule().HandleMessage(message.Content)
+	case messaging.DebugMessageEventType:
+		return node.handleDebugMessage(message)
 	default:
-		log.Printf("[WARN] Unsupported PocketEvent topic: %s \n", event.Topic)
+		log.Printf("[WARN] Unsupported message content type: %s \n", contentType)
 	}
 	return nil
 }
 
-func (node *Node) handleDebugEvent(anyMessage *anypb.Any) error {
-	var debugMessage types.DebugMessage
-	err := anypb.UnmarshalTo(anyMessage, &debugMessage, proto.UnmarshalOptions{})
+func (node *Node) handleDebugMessage(message *messaging.PocketEnvelope) error {
+	// Consensus Debug
+	debugMessage, err := messaging.UnpackMessage[*messaging.DebugMessage](message)
 	if err != nil {
 		return err
 	}
 	switch debugMessage.Action {
-	case types.DebugMessageAction_DEBUG_CONSENSUS_RESET_TO_GENESIS:
+	case messaging.DebugMessageAction_DEBUG_CONSENSUS_RESET_TO_GENESIS:
 		fallthrough
-	case types.DebugMessageAction_DEBUG_CONSENSUS_PRINT_NODE_STATE:
+	case messaging.DebugMessageAction_DEBUG_CONSENSUS_PRINT_NODE_STATE:
 		fallthrough
-	case types.DebugMessageAction_DEBUG_CONSENSUS_TRIGGER_NEXT_VIEW:
+	case messaging.DebugMessageAction_DEBUG_CONSENSUS_TRIGGER_NEXT_VIEW:
 		fallthrough
-	case types.DebugMessageAction_DEBUG_CONSENSUS_TOGGLE_PACE_MAKER_MODE:
-		return node.GetBus().GetConsensusModule().HandleDebugMessage(&debugMessage)
+	case messaging.DebugMessageAction_DEBUG_CONSENSUS_TOGGLE_PACE_MAKER_MODE:
+		return node.GetBus().GetConsensusModule().HandleDebugMessage(debugMessage)
+	// Persistence Debug
+	case messaging.DebugMessageAction_DEBUG_SHOW_LATEST_BLOCK_IN_STORE:
+		return node.GetBus().GetPersistenceModule().HandleDebugMessage(debugMessage)
+	// Default Debug
 	default:
 		log.Printf("Debug message: %s \n", debugMessage.Message)
 	}
 
 	return nil
+}
+
+func (node *Node) GetModuleName() string {
+	return mainModuleName
+}
+
+func (node *Node) GetP2PAddress() cryptoPocket.Address {
+	return node.p2pAddress
 }

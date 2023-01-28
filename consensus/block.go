@@ -1,117 +1,93 @@
 package consensus
 
 import (
-	"encoding/hex"
+	"fmt"
+	"log"
 	"unsafe"
 
-	"github.com/pokt-network/pocket/shared/types"
-
 	typesCons "github.com/pokt-network/pocket/consensus/types"
-	typesGenesis "github.com/pokt-network/pocket/shared/types/genesis"
+	coreTypes "github.com/pokt-network/pocket/shared/core/types"
 )
 
-// TODO(olshansky): Sync with Andrew on the type of validation we need here.
-func (m *consensusModule) validateBlock(block *types.Block) error {
+func (m *consensusModule) commitBlock(block *coreTypes.Block) error {
+	// Commit the context
+	if err := m.utilityContext.Commit(block.BlockHeader.QuorumCertificate); err != nil {
+		return err
+	}
+	m.nodeLog(typesCons.CommittingBlock(m.height, len(block.Transactions)))
+
+	// Release the context
+	if err := m.utilityContext.Release(); err != nil {
+		log.Println("[WARN] Error releasing utility context: ", err)
+	}
+
+	m.utilityContext = nil
+
+	return nil
+}
+
+// ADDTEST: Add unit tests specific to block validation
+// IMPROVE: Rename to provide clarity of operation. ValidateBasic() is typically a stateless check not stateful
+func (m *consensusModule) isValidMessageBlock(msg *typesCons.HotstuffMessage) (bool, error) {
+	block := msg.GetBlock()
+	step := msg.GetStep()
+
 	if block == nil {
-		return typesCons.ErrNilBlock
-	}
-	return nil
-}
-
-// This is a helper function intended to be called by a leader/validator during a view change
-func (m *consensusModule) prepareBlock() (*types.Block, error) {
-	if m.isReplica() {
-		return nil, typesCons.ErrReplicaPrepareBlock
+		if step != NewRound {
+			return false, fmt.Errorf("validateBlockBasic failed - block is nil during step %s", typesCons.StepToString[m.step])
+		}
+		m.nodeLog("[DEBUG] Nil (expected) block is present during NewRound step.")
+		return true, nil
 	}
 
-	if err := m.updateUtilityContext(); err != nil {
-		return nil, err
+	if block != nil && step == NewRound {
+		return false, fmt.Errorf("validateBlockBasic failed - block is not nil during step %s", typesCons.StepToString[m.step])
 	}
 
-	txs, err := m.utilityContext.GetTransactionsForProposal(m.privateKey.Address(), maxTxBytes, lastByzValidators)
-	if err != nil {
-		return nil, err
+	if block != nil && unsafe.Sizeof(*block) > uintptr(m.genesisState.GetMaxBlockBytes()) {
+		return false, typesCons.ErrInvalidBlockSize(uint64(unsafe.Sizeof(*block)), m.genesisState.GetMaxBlockBytes())
 	}
 
-	appHash, err := m.utilityContext.ApplyBlock(int64(m.Height), m.privateKey.Address(), txs, lastByzValidators)
-	if err != nil {
-		return nil, err
+	// If the current block being processed (i.e. voted on) by consensus is non nil, we need to make
+	// sure that the data (height, round, step, txs, etc) is the same before we start validating the signatures
+	if m.block != nil {
+		if m.block.BlockHeader.StateHash != block.BlockHeader.StateHash {
+			return false, fmt.Errorf("validateBlockBasic failed - block hash is not the same as the current block being processed by consensus")
+		}
+
+		// DISCUSS: The only difference between blocks from one step to another is the QC, so we need
+		//          to determine where/how to validate this
+		if protoHash(m.block) != protoHash(block) {
+			log.Println("[TECHDEBT] validateBlockBasic warning - block hash is the same but serialization is not")
+		}
 	}
 
-	blockHeader := &types.BlockHeader{
-		Height:            int64(m.Height),
-		Hash:              hex.EncodeToString(appHash),
-		NumTxs:            uint32(len(txs)),
-		LastBlockHash:     typesGenesis.GetNodeState(nil).AppHash, // testing temporary
-		ProposerAddress:   m.privateKey.Address(),
-		QuorumCertificate: nil,
-	}
-
-	block := &types.Block{
-		BlockHeader:  blockHeader,
-		Transactions: txs,
-	}
-
-	return block, nil
-}
-
-// This is a helper function intended to be called by a replica/voter during a view change
-func (m *consensusModule) applyBlock(block *types.Block) error {
-	if m.isLeader() {
-		return typesCons.ErrLeaderApplyBLock
-	}
-
-	// TODO(olshansky): Add unit tests to verify this.
-	if unsafe.Sizeof(*block) > uintptr(m.consCfg.MaxBlockBytes) {
-		return typesCons.ErrInvalidBlockSize(uint64(unsafe.Sizeof(*block)), m.consCfg.MaxBlockBytes)
-	}
-
-	if err := m.updateUtilityContext(); err != nil {
-		return err
-	}
-
-	appHash, err := m.utilityContext.ApplyBlock(int64(m.Height), m.privateKey.Address(), block.Transactions, lastByzValidators)
-	if err != nil {
-		return err
-	}
-
-	// TODO(olshansky) blockhash is not the appHash. Discuss offline with Andrew
-	if block.BlockHeader.Hash != hex.EncodeToString(appHash) {
-		return typesCons.ErrInvalidAppHash(block.BlockHeader.Hash, hex.EncodeToString(appHash))
-	}
-
-	return nil
+	return true, nil
 }
 
 // Creates a new Utility context and clears/nullifies any previous contexts if they exist
-func (m *consensusModule) updateUtilityContext() error {
+func (m *consensusModule) refreshUtilityContext() error {
+	// Catch-all structure to release the previous utility context if it wasn't properly cleaned up.
+	// Ideally, this should not be called.
 	if m.utilityContext != nil {
 		m.nodeLog(typesCons.NilUtilityContextWarning)
-		m.utilityContext.ReleaseContext()
+		if err := m.utilityContext.Release(); err != nil {
+			log.Printf("[WARN] Error releasing utility context: %v\n", err)
+		}
 		m.utilityContext = nil
 	}
 
-	utilityContext, err := m.GetBus().GetUtilityModule().NewContext(int64(m.Height))
+	// Only one write context can exist at a time, and the utility context needs to instantiate
+	// a new one to modify the state.
+	if err := m.GetBus().GetPersistenceModule().ReleaseWriteContext(); err != nil {
+		log.Printf("[WARN] Error releasing persistence write context: %v\n", err)
+	}
+
+	utilityContext, err := m.GetBus().GetUtilityModule().NewContext(int64(m.height))
 	if err != nil {
 		return err
 	}
 
 	m.utilityContext = utilityContext
-	return nil
-}
-
-func (m *consensusModule) commitBlock(block *types.Block) error {
-	m.nodeLog(typesCons.CommittingBlock(m.Height, len(block.Transactions)))
-
-	if err := m.utilityContext.GetPersistenceContext().Commit(); err != nil {
-		return err
-	}
-	m.utilityContext.ReleaseContext()
-	m.utilityContext = nil
-
-	state := typesGenesis.GetNodeState(nil)
-	state.UpdateAppHash(block.BlockHeader.Hash)
-	state.UpdateBlockHeight(uint64(block.BlockHeader.Height))
-
 	return nil
 }

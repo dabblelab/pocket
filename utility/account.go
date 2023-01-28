@@ -1,49 +1,20 @@
 package utility
 
 import (
+	"github.com/pokt-network/pocket/utility/types"
 	"math/big"
-
-	"github.com/pokt-network/pocket/shared/types"
-	typesUtil "github.com/pokt-network/pocket/utility/types"
 )
 
-func (u *UtilityContext) HandleMessageSend(message *typesUtil.MessageSend) types.Error {
-	// convert the amount to big.Int
-	amount, err := types.StringToBigInt(message.Amount)
-	if err != nil {
-		return err
-	}
-	// get the sender's account amount
-	fromAccountAmount, err := u.GetAccountAmount(message.FromAddress)
-	if err != nil {
-		return err
-	}
-	// subtract that amount from the sender
-	fromAccountAmount.Sub(fromAccountAmount, amount)
-	// if they go negative, they don't have sufficient funds
-	// NOTE: we don't use the u.SubtractAccountAmount() function because Utility needs to do this check
-	if fromAccountAmount.Sign() == -1 {
-		return types.ErrInsufficientAmountError()
-	}
-	// add the amount to the recipient's account
-	if err := u.AddAccountAmount(message.ToAddress, amount); err != nil {
-		return err
-	}
-	// set the sender's account amount
-	if err := u.SetAccountAmount(message.FromAddress, fromAccountAmount); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (u *UtilityContext) GetMessageSendSignerCandidates(msg *typesUtil.MessageSend) ([][]byte, types.Error) {
-	// only the from address is a proper signer candidate
-	return [][]byte{msg.FromAddress}, nil
-}
+// 'Accounts' are structures in the utility module that closely resemble currency holding vehicles: like a bank account.
+//  Accounts enable the 'ownership' or 'custody' over uPOKT tokens. These structures are fundamental to enabling
+//  the utility economy.
 
 func (u *UtilityContext) GetAccountAmount(address []byte) (*big.Int, types.Error) {
-	store := u.Store()
-	amount, err := store.GetAccountAmount(address)
+	store, height, er := u.GetStoreAndHeight()
+	if er != nil {
+		return nil, er
+	}
+	amount, err := store.GetAccountAmount(address, height)
 	if err != nil {
 		return nil, types.ErrGetAccountAmount(err)
 	}
@@ -83,8 +54,11 @@ func (u *UtilityContext) SubPoolAmount(name string, amountToSub string) types.Er
 }
 
 func (u *UtilityContext) GetPoolAmount(name string) (*big.Int, types.Error) {
-	store := u.Store()
-	tokens, er := store.GetPoolAmount(name)
+	store, height, err := u.GetStoreAndHeight()
+	if err != nil {
+		return nil, err
+	}
+	tokens, er := store.GetPoolAmount(name, height)
 	if er != nil {
 		return nil, types.ErrGetPoolAmount(name, er)
 	}
@@ -97,7 +71,7 @@ func (u *UtilityContext) GetPoolAmount(name string) (*big.Int, types.Error) {
 
 func (u *UtilityContext) InsertPool(name string, address []byte, amount string) types.Error {
 	store := u.Store()
-	if err := store.InsertPool(name, address, amount); err != nil {
+	if err := store.InsertPool(name, amount); err != nil {
 		return types.ErrSetPool(name, err)
 	}
 	return nil

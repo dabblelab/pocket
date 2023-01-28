@@ -3,92 +3,135 @@ package utility
 import (
 	"encoding/hex"
 
+	"github.com/pokt-network/pocket/shared/codec"
 	"github.com/pokt-network/pocket/shared/modules"
-	"github.com/pokt-network/pocket/shared/types"
 	typesUtil "github.com/pokt-network/pocket/utility/types"
 )
 
-// TODO (Team) Protocol hour discussion about contexts. We need to better understand the intermodule relationship here
-
+// TODO: The implementation of `UtilityContext` should not be exposed.
 type UtilityContext struct {
-	LatestHeight int64
-	Mempool      types.Mempool
-	Context      *Context
+	Height  int64
+	Mempool typesUtil.Mempool // IMPROVE: Look into accessing this directly from the module without needing to pass and save another pointer (e.g. access via bus)
+	Context *Context          // IMPROVE: Rename to `persistenceContext` or `storeContext` or `reversibleContext`?
+
+	// Data related to the Block being proposed
+	// TECHDEBT: When we consolidate everything to have a single `Block` object (a struct backed by a protobuf),
+	//           this can be simplified to just point to that object.
+	proposalProposerAddr []byte
+	proposalStateHash    string
+	proposalBlockTxs     [][]byte
 }
 
+// IMPROVE: Consider renaming to `persistenceContext` or `storeContext`?
 type Context struct {
-	modules.PersistenceContext
+	// CLEANUP: Since `Context` embeds `PersistenceRWContext`, we don't need to do `u.Context.PersistenceRWContext`, but can call `u.Context` directly
+	modules.PersistenceRWContext
+	// TODO(#327): `SavePoints`` have not been implemented yet
 	SavePointsM map[string]struct{}
 	SavePoints  [][]byte
 }
 
-func (u *UtilityModule) NewContext(height int64) (modules.UtilityContext, error) {
-	ctx, err := u.GetBus().GetPersistenceModule().NewContext(height)
+func (u *utilityModule) NewContext(height int64) (modules.UtilityContext, error) {
+	ctx, err := u.GetBus().GetPersistenceModule().NewRWContext(height)
 	if err != nil {
-		return nil, types.ErrNewPersistenceContext(err)
+		return nil, typesUtil.ErrNewPersistenceContext(err)
 	}
 	return &UtilityContext{
-		LatestHeight: height,
-		Mempool:      u.Mempool,
+		Height:  height,
+		Mempool: u.Mempool,
 		Context: &Context{
-			PersistenceContext: ctx,
-			SavePoints:         make([][]byte, 0),
-			SavePointsM:        make(map[string]struct{}),
+			PersistenceRWContext: ctx,
+			SavePoints:           make([][]byte, 0),
+			SavePointsM:          make(map[string]struct{}),
 		},
 	}, nil
+}
+
+func (p *UtilityContext) SetProposalBlock(blockHash string, proposerAddr []byte, transactions [][]byte) error {
+	p.proposalProposerAddr = proposerAddr
+	p.proposalStateHash = blockHash
+	p.proposalBlockTxs = transactions
+	return nil
 }
 
 func (u *UtilityContext) Store() *Context {
 	return u.Context
 }
 
-func (u *UtilityContext) GetPersistenceContext() modules.PersistenceContext {
-	return u.Context.PersistenceContext
+func (u *UtilityContext) GetPersistenceContext() modules.PersistenceRWContext {
+	return u.Context.PersistenceRWContext
 }
 
-func (u *UtilityContext) ReleaseContext() {
-	u.Context.Release()
+func (u *UtilityContext) Commit(quorumCert []byte) error {
+	if err := u.Context.PersistenceRWContext.Commit(u.proposalProposerAddr, quorumCert); err != nil {
+		return err
+	}
 	u.Context = nil
+	return nil
 }
 
-func (u *UtilityContext) GetLatestHeight() (int64, types.Error) {
-	return u.LatestHeight, nil
+func (u *UtilityContext) Release() error {
+	if u.Context == nil {
+		return nil
+	}
+	if err := u.Context.Release(); err != nil {
+		return err
+	}
+	u.Context = nil
+	return nil
 }
 
-func (u *UtilityContext) Codec() types.Codec {
-	return types.GetCodec()
+func (u *UtilityContext) GetLatestBlockHeight() (int64, typesUtil.Error) {
+	height, er := u.Store().GetHeight()
+	if er != nil {
+		return 0, typesUtil.ErrGetHeight(er)
+	}
+	return height, nil
 }
 
-func (u *UtilityContext) RevertLastSavePoint() types.Error {
+func (u *UtilityContext) GetStoreAndHeight() (*Context, int64, typesUtil.Error) {
+	store := u.Store()
+	height, er := store.GetHeight()
+	if er != nil {
+		return nil, 0, typesUtil.ErrGetHeight(er)
+	}
+	return store, height, nil
+}
+
+func (u *UtilityContext) Codec() codec.Codec {
+	return codec.GetCodec()
+}
+
+func (u *UtilityContext) RevertLastSavePoint() typesUtil.Error {
 	if len(u.Context.SavePointsM) == typesUtil.ZeroInt {
-		return types.ErrEmptySavePoints()
+		return typesUtil.ErrEmptySavePoints()
 	}
 	var key []byte
 	popIndex := len(u.Context.SavePoints) - 1
 	key, u.Context.SavePoints = u.Context.SavePoints[popIndex], u.Context.SavePoints[:popIndex]
 	delete(u.Context.SavePointsM, hex.EncodeToString(key))
-	if err := u.Context.PersistenceContext.RollbackToSavePoint(key); err != nil {
-		return types.ErrRollbackSavePoint(err)
+	if err := u.Context.PersistenceRWContext.RollbackToSavePoint(key); err != nil {
+		return typesUtil.ErrRollbackSavePoint(err)
 	}
 	return nil
 }
 
-func (u *UtilityContext) NewSavePoint(transactionHash []byte) types.Error {
-	if err := u.Context.PersistenceContext.NewSavePoint(transactionHash); err != nil {
-		return types.ErrNewSavePoint(err)
+func (u *UtilityContext) NewSavePoint(transactionHash []byte) typesUtil.Error {
+	if err := u.Context.PersistenceRWContext.NewSavePoint(transactionHash); err != nil {
+		return typesUtil.ErrNewSavePoint(err)
 	}
 	txHash := hex.EncodeToString(transactionHash)
 	if _, exists := u.Context.SavePointsM[txHash]; exists {
-		return types.ErrDuplicateSavePoint()
+		return typesUtil.ErrDuplicateSavePoint()
 	}
 	u.Context.SavePoints = append(u.Context.SavePoints, transactionHash)
 	u.Context.SavePointsM[txHash] = struct{}{}
 	return nil
 }
 
-func (c *Context) Reset() types.Error {
-	if err := c.PersistenceContext.Reset(); err != nil {
-		return types.ErrResetContext(err)
+func (c *Context) Reset() typesUtil.Error {
+	if err := c.PersistenceRWContext.Release(); err != nil {
+		return typesUtil.ErrResetContext(err)
 	}
 	return nil
 }

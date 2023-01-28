@@ -4,9 +4,7 @@ import (
 	"log"
 
 	typesCons "github.com/pokt-network/pocket/consensus/types"
-	"github.com/pokt-network/pocket/shared/config"
 	"github.com/pokt-network/pocket/shared/modules"
-	typesGenesis "github.com/pokt-network/pocket/shared/types/genesis"
 )
 
 type LeaderElectionModule interface {
@@ -14,16 +12,20 @@ type LeaderElectionModule interface {
 	ElectNextLeader(*typesCons.HotstuffMessage) (typesCons.NodeId, error)
 }
 
-var _ leaderElectionModule = leaderElectionModule{}
+var _ LeaderElectionModule = &leaderElectionModule{}
 
 type leaderElectionModule struct {
 	bus modules.Bus
 }
 
-func Create(
-	config *config.Config,
-) (LeaderElectionModule, error) {
-	return &leaderElectionModule{}, nil
+func Create(bus modules.Bus) (modules.Module, error) {
+	return new(leaderElectionModule).Create(bus)
+}
+
+func (*leaderElectionModule) Create(bus modules.Bus) (modules.Module, error) {
+	m := &leaderElectionModule{}
+	bus.RegisterModule(m)
+	return m, nil
 }
 
 func (m *leaderElectionModule) Start() error {
@@ -33,6 +35,10 @@ func (m *leaderElectionModule) Start() error {
 
 func (m *leaderElectionModule) Stop() error {
 	return nil
+}
+
+func (m *leaderElectionModule) GetModuleName() string {
+	return modules.LeaderElectionModuleName
 }
 
 func (m *leaderElectionModule) SetBus(pocketBus modules.Bus) {
@@ -47,11 +53,26 @@ func (m *leaderElectionModule) GetBus() modules.Bus {
 }
 
 func (m *leaderElectionModule) ElectNextLeader(message *typesCons.HotstuffMessage) (typesCons.NodeId, error) {
-	return m.electNextLeaderDeterministicRoundRobin(message), nil
+	nodeId, err := m.electNextLeaderDeterministicRoundRobin(message)
+	if err != nil {
+		return typesCons.NodeId(0), err
+	}
+	return nodeId, nil
 }
 
-func (m *leaderElectionModule) electNextLeaderDeterministicRoundRobin(message *typesCons.HotstuffMessage) typesCons.NodeId {
-	valMap := typesGenesis.GetNodeState(nil).ValidatorMap
+func (m *leaderElectionModule) electNextLeaderDeterministicRoundRobin(message *typesCons.HotstuffMessage) (typesCons.NodeId, error) {
+	height := int64(message.Height)
+	readCtx, err := m.GetBus().GetPersistenceModule().NewReadContext(height)
+	if err != nil {
+		return typesCons.NodeId(0), err
+	}
+	vals, err := readCtx.GetAllValidators(height)
+	if err != nil {
+		return typesCons.NodeId(0), err
+	}
+
 	value := int64(message.Height) + int64(message.Round) + int64(message.Step) - 1
-	return typesCons.NodeId(value%int64(len(valMap)) + 1)
+	numVals := int64(len(vals))
+
+	return typesCons.NodeId(value%numVals + 1), nil
 }

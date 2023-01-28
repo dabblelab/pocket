@@ -1,11 +1,14 @@
 package types
 
+// TECHDEBT: Avoid having a centralized file for all errors (harder to maintain and identify).
+
 import (
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 
+	"github.com/pokt-network/pocket/shared/codec"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -17,12 +20,12 @@ const (
 	ProposalBlockExtends     = "the ProposalQC block is the same as the LockedQC block"
 
 	// WARN
-	NilUtilityContextWarning     = "[WARN] Utility context not nil when preparing a new block? Releasing for now but should not happen"
-	InvalidPartialSigInQCWarning = "[WARN] QC contains an invalid partial signature"
+	NilUtilityContextWarning     = "⚠️ [WARN] utilityContext expected to be nil but is not. TODO: Investigate why this is and fix it"
+	InvalidPartialSigInQCWarning = "⚠️ [WARN] QC contains an invalid partial signature"
 
 	// DEBUG
-	DebugResetToGenesis  = "[DEBUG] Resetting to genesis..."
-	DebugTriggerNextView = "[DEBUG] Triggering next view..."
+	DebugResetToGenesis  = "🧑‍💻 [DEVELOP] Resetting to genesis..."
+	DebugTriggerNextView = "🧑‍💻 [DEVELOP] Triggering next view..."
 )
 
 var StepToString map[HotstuffStep]string
@@ -34,48 +37,57 @@ func init() {
 	}
 }
 
-func PacemakerInterrupt(height uint64, step HotstuffStep, round uint64) string {
-	return fmt.Sprintf("INTERRUPT at (height, step, round): (%d, %s, %d)!", height, StepToString[step], round)
+// TODO(#288): Improve all of this logging:
+// 1. Replace `fmt.Sprintf` with `log.Printf` (or similar)
+// 2. Add the appropriate log level (warn, debug, etc...) where appropriate
+// 3. Remove this file and move log related text into place (easier to maintain, debug, understand, etc.)
+
+func PacemakerInterrupt(reason string, height uint64, step HotstuffStep, round uint64) string {
+	return fmt.Sprintf("⏰ Interrupt ⏰ at (height, step, round): (%d, %s, %d)! Reason: %s", height, StepToString[step], round, reason)
 }
 
 func PacemakerTimeout(height uint64, step HotstuffStep, round uint64) string {
-	return fmt.Sprintf("Timed out at (height, step, round) (%d, %s, %d)!", height, StepToString[step], round)
+	return fmt.Sprintf("⌛ Timed out ⌛ at (height, step, round) (%d, %s, %d)!", height, StepToString[step], round)
 }
 
 func PacemakerNewHeight(height uint64) string {
-	return fmt.Sprintf("Starting first round for new block at height: %d", height)
+	return fmt.Sprintf("🏁 Starting 1st round 🏁 for height: %d", height)
 }
 
 func PacemakerCatchup(height1, step1, round1, height2, step2, round2 uint64) string {
-	return fmt.Sprintf("pacemaker catching up the node's (height, step, round) FROM (%d, %s, %d) TO (%d, %s, %d)", height1, StepToString[HotstuffStep(step1)], round1, height2, StepToString[HotstuffStep(step2)], round2)
+	return fmt.Sprintf("🏃 Pacemaker catching 🏃 up (height, step, round) FROM (%d, %d, %d) TO (%d, %d, %d)", height1, step1, round1, height2, step2, round2)
 }
 
 func OptimisticVoteCountWaiting(step HotstuffStep, status string) string {
-	return fmt.Sprintf("Still waiting for more %s messages; %s", StepToString[step], status)
+	return fmt.Sprintf("⏳ Waiting ⏳for more %s messages; %s", StepToString[step], status)
 }
 
-func OptimisticVoteCountPassed(step HotstuffStep) string {
-	return fmt.Sprintf("received enough %s votes!", StepToString[step])
+func OptimisticVoteCountPassed(height uint64, step HotstuffStep, round uint64) string {
+	return fmt.Sprintf("📬 Received enough 📬 votes at (height, step, round) (%d, %s, %d)", height, StepToString[step], round)
 }
 
 func CommittingBlock(height uint64, numTxs int) string {
-	return fmt.Sprintf("🧱🧱🧱 Committing block at height %d with %d transactions 🧱🧱🧱", height, numTxs)
+	return fmt.Sprintf("🧱 Committing block 🧱 at height %d with %d transactions", height, numTxs)
 }
 
-func ElectedNewLeader(address string, nodeId NodeId) string {
-	return fmt.Sprintf("Elected new 👑: %d (%s)", nodeId, address)
+func ElectedNewLeader(address string, nodeId NodeId, height, round uint64) string {
+	return fmt.Sprintf("🙇 Elected leader 🙇 for height/round %d/%d: [%d] (%s)", height, round, nodeId, address)
 }
 
-func ElectedSelfAsNewLeader(address string, nodeId NodeId) string {
-	return fmt.Sprintf("👑👑👑👑👑   %d   👑👑👑👑👑 (%s)", nodeId, address)
+func ElectedSelfAsNewLeader(address string, nodeId NodeId, height, round uint64) string {
+	return fmt.Sprintf("👑 I am the leader 👑 for height/round %d/%d: [%d] (%s)", height, round, nodeId, address)
 }
 
 func SendingMessage(msg *HotstuffMessage, nodeId NodeId) string {
-	return fmt.Sprintf("Sending %s message to %d", StepToString[msg.Step], nodeId)
+	return fmt.Sprintf("✉️ Sending message ✉️ to %d at (height, step, round) (%d, %d, %d)", nodeId, msg.Height, msg.Step, msg.Round)
 }
 
 func BroadcastingMessage(msg *HotstuffMessage) string {
-	return fmt.Sprintf("Broadcasting message for %s step", StepToString[msg.Step])
+	return fmt.Sprintf("📣 Broadcasting message 📣 (height, step, round): (%d, %d, %d)", msg.GetHeight(), msg.GetStep(), msg.GetRound())
+}
+
+func RestartTimer() string {
+	return fmt.Sprintln("Restarting timer")
 }
 
 func WarnInvalidPartialSigInQC(address string, nodeId NodeId) string {
@@ -83,37 +95,43 @@ func WarnInvalidPartialSigInQC(address string, nodeId NodeId) string {
 }
 
 func WarnMissingPartialSig(msg *HotstuffMessage) string {
-	return fmt.Sprintf("[WARN] No partial signature found for step %s which should not happen...", StepToString[msg.Step])
+	return fmt.Sprintf("⚠️ [WARN] No partial signature found for step %s which should not happen...", StepToString[msg.GetStep()])
 }
 
 func WarnDiscardHotstuffMessage(_ *HotstuffMessage, reason string) string {
-	return fmt.Sprintf("[WARN] %s because: %s", DisregardHotstuffMessage, reason)
+	return fmt.Sprintf("⚠️ [WARN] %s because: %s", DisregardHotstuffMessage, reason)
 }
 
 func WarnUnexpectedMessageInPool(_ *HotstuffMessage, height uint64, step HotstuffStep, round uint64) string {
-	return fmt.Sprintf("[WARN] Message in pool does not match (height, step, round) of QC being generated; %d, %s, %d", height, StepToString[step], round)
+	return fmt.Sprintf("⚠️ [WARN] Message in pool does not match (height, step, round) of QC being generated; %d, %s, %d", height, StepToString[step], round)
 }
 
 func WarnIncompletePartialSig(ps *PartialSignature, msg *HotstuffMessage) string {
-	return fmt.Sprintf("[WARN] Partial signature is incomplete for step %s which should not happen...", StepToString[msg.Step])
+	return fmt.Sprintf("⚠️ [WARN] Partial signature is incomplete for step %s which should not happen...", StepToString[msg.GetStep()])
 }
 
 func DebugTogglePacemakerManualMode(mode string) string {
-	return fmt.Sprintf("[DEBUG] Toggling pacemaker manual mode to %s", mode)
+	return fmt.Sprintf("🔎 [DEBUG] Toggling pacemaker manual mode to %s", mode)
 }
 
 func DebugNodeState(state ConsensusNodeState) string {
-	return fmt.Sprintf("\t[DEBUG] NODE STATE: Node %d is at (Height, Step, Round): (%d, %d, %d)\n", state.NodeId, state.Height, state.Step, state.Round)
+	return fmt.Sprintf("🔎 [DEBUG] Node %d is at (Height, Step, Round): (%d, %d, %d)", state.NodeId, state.Height, state.Step, state.Round)
 }
 
+// TODO(olshansky): Add source and destination NodeId of message here
+func DebugReceivedHandlingHotstuffMessage(msg *HotstuffMessage) string {
+	return fmt.Sprintf("🔎 [DEBUG] Received hotstuff msg at (Height, Step, Round): (%d, %d, %d)", msg.Height, msg.GetStep(), msg.Round)
+}
+
+// TODO(olshansky): Add source and destination NodeId of message here
 func DebugHandlingHotstuffMessage(msg *HotstuffMessage) string {
-	// TODO(olshansky): Add source and destination NodeId of message here
-	return fmt.Sprintf("[DEBUG] Handling message w/ Height: %d; Type: %s; Round: %d.", msg.Height, StepToString[msg.Step], msg.Round)
+	return fmt.Sprintf("🔎 [DEBUG] Handling hotstuff msg at (Height, Step, Round): (%d, %d, %d)", msg.Height, msg.GetStep(), msg.Round)
 }
 
 // Errors
 const (
 	nilBLockError                               = "block is nil"
+	blockExistsError                            = "block exists but should be nil"
 	nilBLockProposalError                       = "block should never be nil when creating a proposal message"
 	nilBLockVoteError                           = "block should never be nil when creating a vote message for a proposal"
 	proposalNotValidInPrepareError              = "proposal is not valid in the PREPARE step"
@@ -122,7 +140,8 @@ const (
 	nilBlockInQCError                           = "QC must contain a non nil block"
 	nilThresholdSigInQCError                    = "QC must contains a non nil threshold signature"
 	notEnoughSignaturesError                    = "did not receive enough partial signature"
-	nodeIsLockedOnPastQCError                   = "node is locked on a QC from the past"
+	nodeIsLockedOnPastHeightQCError             = "node is locked on a QC from a past height"
+	nodeIsLockedOnPastRoundQCError              = "node is locked on a QC from a past round"
 	unhandledProposalCaseError                  = "unhandled proposal validation check"
 	unnecessaryPartialSigForNewRoundError       = "newRound messages do not need a partial signature"
 	unnecessaryPartialSigForLeaderProposalError = "leader proposals do not need a partial signature"
@@ -142,17 +161,19 @@ const (
 	prepareBlockError                           = "could not prepare block"
 	commitBlockError                            = "could not commit block"
 	replicaPrepareBlockError                    = "node should not call `prepareBlock` if it is not a leader"
-	leaderErrApplyBlock                         = "node should not call `applyBlock` if it is leader"
 	blockSizeTooLargeError                      = "block size is too large"
 	sendMessageError                            = "error sending message"
 	broadcastMessageError                       = "error broadcasting message"
 	createConsensusMessageError                 = "error creating consensus message"
 	anteValidationError                         = "discarding hotstuff message because ante validation failed"
 	nilLeaderIdError                            = "attempting to send a message to leader when LeaderId is nil"
+	newPersistenceReadContextError              = "error creating new persistence read context"
+	persistenceGetAllValidatorsError            = "error getting all validators from persistence"
 )
 
 var (
 	ErrNilBlock                               = errors.New(nilBLockError)
+	ErrBlockExists                            = errors.New(blockExistsError)
 	ErrNilBlockProposal                       = errors.New(nilBLockProposalError)
 	ErrNilBlockVote                           = errors.New(nilBLockVoteError)
 	ErrProposalNotValidInPrepare              = errors.New(proposalNotValidInPrepareError)
@@ -161,7 +182,8 @@ var (
 	ErrNilBlockInQC                           = errors.New(nilBlockInQCError)
 	ErrNilThresholdSigInQC                    = errors.New(nilThresholdSigInQCError)
 	ErrNotEnoughSignatures                    = errors.New(notEnoughSignaturesError)
-	ErrNodeIsLockedOnPastQC                   = errors.New(nodeIsLockedOnPastQCError)
+	ErrNodeLockedPastHeight                   = errors.New(nodeIsLockedOnPastHeightQCError)
+	ErrNodeLockedPastRound                    = errors.New(nodeIsLockedOnPastRoundQCError)
 	ErrUnhandledProposalCase                  = errors.New(unhandledProposalCaseError)
 	ErrUnnecessaryPartialSigForNewRound       = errors.New(unnecessaryPartialSigForNewRoundError)
 	ErrUnnecessaryPartialSigForLeaderProposal = errors.New(unnecessaryPartialSigForLeaderProposalError)
@@ -177,12 +199,13 @@ var (
 	ErrPrepareBlock                           = errors.New(prepareBlockError)
 	ErrCommitBlock                            = errors.New(commitBlockError)
 	ErrReplicaPrepareBlock                    = errors.New(replicaPrepareBlockError)
-	ErrLeaderApplyBLock                       = errors.New(leaderErrApplyBlock)
 	ErrSendMessage                            = errors.New(sendMessageError)
 	ErrBroadcastMessage                       = errors.New(broadcastMessageError)
 	ErrCreateConsensusMessage                 = errors.New(createConsensusMessageError)
 	ErrHotstuffValidation                     = errors.New(anteValidationError)
 	ErrNilLeaderId                            = errors.New(nilLeaderIdError)
+	ErrNewPersistenceReadContext              = errors.New(newPersistenceReadContextError)
+	ErrPersistenceGetAllValidators            = errors.New(persistenceGetAllValidatorsError)
 )
 
 func ErrInvalidBlockSize(blockSize, maxSize uint64) error {
@@ -203,7 +226,7 @@ func ErrMissingValidator(address string, nodeId NodeId) error {
 
 func ErrValidatingPartialSig(senderAddr string, senderNodeId NodeId, msg *HotstuffMessage, pubKey string) error {
 	return fmt.Errorf("%s: Sender: %s (%d); Height: %d; Step: %s; Round: %d; SigHash: %s; BlockHash: %s; PubKey: %s",
-		invalidPartialSignatureError, senderAddr, senderNodeId, msg.Height, StepToString[msg.Step], msg.Round, string(msg.GetPartialSignature().Signature), protoHash(msg.Block), pubKey)
+		invalidPartialSignatureError, senderAddr, senderNodeId, msg.Height, StepToString[msg.GetStep()], msg.Round, string(msg.GetPartialSignature().Signature), protoHash(msg.Block), pubKey)
 }
 
 func ErrPacemakerUnexpectedMessageHeight(err error, heightCurrent, heightMessage uint64) error {
@@ -211,10 +234,10 @@ func ErrPacemakerUnexpectedMessageHeight(err error, heightCurrent, heightMessage
 }
 
 func ErrPacemakerUnexpectedMessageStepRound(err error, step HotstuffStep, round uint64, msg *HotstuffMessage) error {
-	return fmt.Errorf("%s: Current (step, round): (%s, %d); Message (step, round): (%s, %d)", err, StepToString[step], round, StepToString[msg.Step], msg.Round)
+	return fmt.Errorf("%s: Current (step, round): (%s, %d); Message (step, round): (%s, %d)", err, StepToString[step], round, StepToString[msg.GetStep()], msg.Round)
 }
 
-func ErrUnknownConsensusMessageType(msg interface{}) error {
+func ErrUnknownConsensusMessageType(msg any) error {
 	return fmt.Errorf("unknown consensus message type: %v", msg)
 }
 
@@ -235,7 +258,7 @@ func ErrLeaderElection(msg *HotstuffMessage) error {
 }
 
 func protoHash(m proto.Message) string {
-	b, err := proto.Marshal(m)
+	b, err := codec.GetCodec().Marshal(m)
 	if err != nil {
 		log.Fatalf("Could not marshal proto message: %v", err)
 	}

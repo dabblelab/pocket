@@ -1,12 +1,13 @@
 package crypto
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"log"
 )
 
-// TODO(discuss): Consider create a type for signature and having constraints for each type as well.
+// DISCUSS Consider create a type for signature and having constraints for each type as well.
 type Address []byte
 
 type PublicKey interface {
@@ -45,6 +46,14 @@ func (a *Address) UnmarshalJSON(data []byte) error {
 
 func (a *Address) ToString() string {
 	return hex.EncodeToString(*a)
+}
+
+func (a Address) Bytes() []byte {
+	return []byte(a)
+}
+
+func (a Address) Equals(other Address) bool {
+	return bytes.Equal(a, other)
 }
 
 func AddressFromString(s string) Address {

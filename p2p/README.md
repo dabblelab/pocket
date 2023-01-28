@@ -1,81 +1,126 @@
-# P2P Module
+# P2P Module <!-- omit in toc -->
 
-_TODO(derrandz): Add more diagrams_
+This document is meant to be a supplement to the living specification of [1.0 Pocket's P2P Specification](https://github.com/pokt-network/pocket-network-protocol/tree/main/p2p) primarily focused on the implementation, and additional details related to the design of the codebase and information related to development.
 
-Welcome to the P2P Module architecture guide.
+## Table of Contents <!-- omit in toc -->
 
-## 1. Introduction: A word or two about the P2P module
+- [Interface](#interface)
+- [Implementation](#implementation)
+  - [Code Architecture - P2P Module](#code-architecture---p2p-module)
+  - [Code Architecture - Network Module](#code-architecture---network-module)
+  - [Code Organization](#code-organization)
+- [Testing](#testing)
+  - [Running Unit Tests](#running-unit-tests)
+  - [RainTree testing framework](#raintree-testing-framework)
+    - [Helpers](#helpers)
+    - [Test Generators](#test-generators)
+    - [Considerations](#considerations)
 
-We think that it's beneficial to first off set the context properly before we start diving into how this module is architected, so this introduction should help better-understand the decisions behind architecting P2P the way it is.
+## Interface
 
-P2P as a module will primarily deal with:
+This module aims to implement the interface specified in `pocket/shared/modules/p2p_module.go` using the specification above.
 
-- sending data
-- receiving data
-- broadcasting data
+## Implementation
 
-To:
+### Code Architecture - P2P Module
 
-- specific peers
-- the entire network
+```mermaid
+flowchart TD
+    subgraph P2P["P2P Module"]
+        L(Listener)
+        H(Handler)
+        B(Bus)
+        NM(Network Module)
+        L --> H
+        H <--> NM
+    end
+    PN((Pocket Network))
+    N([Pocket Node])
 
-A peer might be involved in multiple processes at once (e.g. sending to 10 peers, receiving from 20, and broadcasting to everyone else) regardless of where these sends are coming from or what will be happening with the received data. Thus, it's crucial that the P2P module be architected in a concurrency-friendly way.
+    B <-.->NM
+    B <-.P2P Interface.-> N
+    PN -.-> L
+    NM -- Send/Broadcast --> PN
 
-One can immediately see that a peer should be able to concurrently:
+    classDef pocket_node fill:#28f,stroke:#016,stroke-width:2px,color:#fff,stroke-dasharray: 5 5
+    class N pocket_node
 
-1. Connect to multiple peers
-2. Receive connections from multiple peers
-3. Read incoming data from connected peers
-4. Send outgoing data to connected peers
+    classDef pocket_network fill:#000fff,stroke:#016,stroke-width:2px,color:#fff,stroke-dasharray: 5 5
+    class PN pocket_network
+```
 
-Therefore, we should at least have 3 "types" long running routines:
+### Code Architecture - Network Module
 
-- A connections establishment routine (_will be termed **listening** routine from now onwards_)
-- A read-from-connection routine (_will be termed **read-routine** from now onwards_)
-- A write-to-connection routine (_will be termed **write-routine** from now onwards_)
+_DISCUSS(team): If you feel this needs a diagram, please reach out to the team for additional details._
+_TODO(olshansky, BenVan): Link to RainTree visualizations once it is complete._
 
-To further help paint a visual image of this, imagine a peer Y being connected to `5 other peers`. Peer Y will have a total `11 routines` running along each other, mainly:
+The `Network Module` is where [RainTree](https://github.com/pokt-network/pocket/files/9853354/raintree.pdf) (or the simpler basic approach) is implemented. See `raintree/network.go` for the specific implementation of RainTree, but please refer to the [specifications](https://github.com/pokt-network/pocket-network-protocol/tree/main/p2p) for more details.
 
-1. A listening routine that accepts incoming connections (`1 routine`)
-2. A read-routine and a write-routine for each connected peer (`2x5 routines`)
+### Code Organization
 
-Now the main question is, how do we achieve this and how do we write it in code, in a "proper" way?
+```bash
+p2p
+├── README.md                               # Self link to this README
+├── transport.go                            # Varying implementations of the `Transport` (e.g. TCP, Passthrough) for network communication
+├── module.go                               # The implementation of the P2P Interface
+├── raintree
+│   ├── addrbook_utils.go             # AddrBook utilities
+│   ├── peers_manager.go              # peersManager implementation
+│   ├── peers_manager_test.go         # peersManager unit tests
+│   ├── network_test.go               # network unit tests
+│   ├── network.go                    # Implementation of the Network interface using RainTree's specification
+│   ├── utils.go
+│   └── types
+│       └── proto
+│           └── raintree.proto
+├── raintree_integration_test.go            # RainTree unit tests
+├── raintree_integration_utils_test.go      # Test suite for RainTree
+├── stdnetwork                              # This can eventually be deprecated once raintree is verified.
+│   └── network.go                    # Implementation of the Network interface using Golang's std networking lib
+├── telemetry
+│   ├── metrics.go
+├── types
+│   ├── addr_book.go                  # addrBook definition
+│   ├── addr_book_map.go              # addrBookMap definition
+│   ├── addr_list.go                  # addrList definition
+│   ├── network.go                    # Network Interface definition
+│   ├── network_peer.go               # networkPeer definition
+│   ├── proto                         # Proto3 messages for generated types
+│   ├── target.go                     # target definition
+└── utils.go
+```
 
-## 2. Architecture
+## Testing
 
-### 2.1 Separating Concerns
+_TODO: The work to add the tooling used to help with unit test generation is being tracked in #314._
 
-It's of no use to re-introduce you to the concept of "Separation of Concerns" or remind you what benefits will divide-and-conquer bring to the world of architecture, so let's go straight into what we think should be separated.
+### Running Unit Tests
 
-We think that the operations of a given peer, in regards to itself and its behavior within the network **should be separated** from the operations its having or performing with the peers its connected to. Meaning, what this given peer wants to do as a singular entity should be separated from what the peer is doing with its active neighbors to either maintain their connection or facilitate connectivity or IO. In clear terms:
+```bash
+make test_p2p
+```
 
-- Operations of a peer:
+### RainTree testing framework
 
-  - listen for new inbound connections
-  - establish new outbound connections
-  - store/map/index established connections
-  - do something with a connection (send, ack, ping...)
+The testing framework for RainTree is a work-in-progress and can be found in `module_raintree_test.go`.
 
-- Operations of a peer that is having/performing with its active neighbors:
-  - authenticate the connection in between
-  - perform continual reads and writes to the connection
-  - handle connectivity issues (timeouts, errors)
-  - close the connection
+The `TestRainTreeCommConfig` struct contains a mapping of `validatorId` to the number of messages it expects to process during a RainTree broadcast:
 
-By **"should be separated"** we mean that the two should be overlooked by different components.
+- `numNetworkReads`: the # of asynchronous reads the node's P2P listener made (i.e. # of messages it received over the network)
+- `numNetworkWrites`: the # of asynchronous writes the node's P2P listener made (i.e. # of messages it tried to send over the network)
+- NOTE: A `demote` does not go over the network and is therefore not considered a `read`.
 
-The component to manage peer-related operations will be named **Peer** and will live under `p2p/peer.go` whereas the component to manage inter-peer operations will be named **Socket** and will under `p2p/socket.go`.
+#### Helpers
 
-## 2.2 Concerns breakdown
+Given a specific `originatorNode` which initiates the broadcast, the `testRainTreeCalls` helper function can be used to configure all the nodes and simulate a broadcast.
 
-### **2.3.1 Peer**
+#### Test Generators
 
-_TODO(derrandz): Write this part._
+The [rain-tree-simulator](https://github.com/pokt-network/rain-tree-sim/blob/main/python) library contains an example Golang implementation and a Python implementation of RainTree simulators.
 
-#### **2.3.2 Socket**
+You can read the documentation in the [python simulator](https://github.com/pokt-network/rain-tree-sim/blob/main/python) on how it can be used to generate the unit tests found in `module_raintree_test.go`.
 
-_TODO(derrandz): Write this part._
+#### Considerations
 
-### 2.3 The Glue
-
-_TODO(derrandz): Write this part._
+- **Deterministic Private Key Generation**: Since RainTree is dependant on the lexicographic order of the addresses, the generation of the private keys (and in turn the public keys and addresses) is important and cannot be randomized for the time being.
+- **Variable Coupling**:There is an implicit coupling between `validatorId`, `serviceUrl` and `genericParam` that requires understanding of the codebase. Reach out to @olshansk or @andrewnguyen22 for clarity on this.

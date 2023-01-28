@@ -1,0 +1,145 @@
+package utility
+
+import (
+	"encoding/binary"
+	"encoding/hex"
+
+	coreTypes "github.com/pokt-network/pocket/shared/core/types"
+	"github.com/pokt-network/pocket/shared/crypto"
+	"github.com/pokt-network/pocket/utility/types"
+)
+
+type Session interface {
+	NewSession(sessionHeight int64, blockHash string, geoZone GeoZone, relayChain RelayChain, application *coreTypes.Actor) (Session, types.Error)
+	GetServiceNodes() []*coreTypes.Actor // the ServiceNodes providing Web3 to the application
+	GetFishermen() []*coreTypes.Actor    // the Fishermen monitoring the serviceNodes
+	GetApplication() *coreTypes.Actor    // the Application consuming the web3 access
+	GetRelayChain() RelayChain           // the chain identifier of the web3
+	GetGeoZone() GeoZone                 // the geolocation zone where all are registered
+	GetSessionHeight() int64             // the block height when the session started
+}
+
+type RelayChain Identifier
+type GeoZone Identifier
+
+type Identifier interface {
+	Name() string
+	ID() string
+	Bytes() []byte
+}
+
+var _ Session = &session{}
+
+type session struct {
+	serviceNodes  []*coreTypes.Actor
+	fishermen     []*coreTypes.Actor
+	application   *coreTypes.Actor
+	relayChain    RelayChain
+	geoZone       GeoZone
+	blockHash     string
+	key           []byte
+	sessionHeight int64
+}
+
+func (s *session) NewSession(sessionHeight int64, blockHash string, geoZone GeoZone, relayChain RelayChain, application *coreTypes.Actor) (session Session, err types.Error) {
+	s.sessionHeight = sessionHeight
+	s.blockHash = blockHash
+	s.geoZone = geoZone
+	s.relayChain = relayChain
+	s.application = application
+	s.key, err = s.sessionKey()
+	if err != nil {
+		return
+	}
+	s.serviceNodes = s.findClosestXServiceNodes()
+	s.fishermen = s.findClosestYFishermen()
+	return s, nil
+}
+
+// use the seed information to determine a SHA3Hash that is used to find the closest N actors based
+// by comparing the sessionKey with the actors' public key
+func (s *session) sessionKey() ([]byte, types.Error) {
+	sessionHeightBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sessionHeightBytes, uint64(s.sessionHeight))
+	blockHashBz, err := hex.DecodeString(s.blockHash)
+	if err != nil {
+		return nil, types.ErrHexDecodeFromString(err)
+	}
+	appPubKey, err := crypto.NewPublicKey(s.application.GetPublicKey())
+	if err != nil {
+		return nil, types.ErrNewPublicKeyFromBytes(err)
+	}
+	return concat(sessionHeightBytes, blockHashBz, s.geoZone.Bytes(), s.relayChain.Bytes(), appPubKey.Bytes()), nil
+}
+
+// uses the current 'world state' to determine the service nodes in the session
+// 1) get an ordered list of the public keys of service nodes who are:
+//    - actively staked
+//    - staked within geo-zone
+//    - staked for relay-chain
+// 2) calls `pseudoRandomSelection(serviceNodes, numberOfNodesPerSession)`
+func (s *session) findClosestXServiceNodes() []*coreTypes.Actor {
+	// IMPORTANT:
+	// THIS IS A DEMONSTRABLE FUNCTION THAT WILL NOT BE IMPLEMENTED AS SUCH
+	// IT EXISTS IN THIS COMMIT PURELY TO COMMUNICATE THE EXPECTED BEHAVIOR
+	return nil
+}
+
+// uses the current 'world state' to determine the fishermen in the session
+// 1) get an ordered list of the public keys of fishermen who are:
+//    - actively staked
+//    - staked within geo-zone
+//    - staked for relay-chain
+// 2) calls `pseudoRandomSelection(fishermen, numberOfFishPerSession)`
+func (s *session) findClosestYFishermen() []*coreTypes.Actor {
+	// IMPORTANT:
+	// THIS IS A DEMONSTRABLE FUNCTION THAT WILL NOT BE IMPLEMENTED AS SUCH
+	// IT EXISTS IN THIS COMMIT PURELY TO COMMUNICATE THE EXPECTED BEHAVIOR
+	return nil
+}
+
+// 1) passed an ordered list of the public keys of actors and number of nodes
+// 2) pseudo-insert the session `key` string into the list and find the first actor directly below
+// 3) newKey = Hash( key + actor1PublicKey )
+// 4) repeat steps 2 and 3 until all N actor are found
+// FAQ:
+// Q) why do we hash to find a newKey between every actor selection?
+// A) pseudo-random selection only works if each iteration is re-randomized
+//    or it would be subject to lexicographical proximity bias attacks
+func (s *session) pseudoRandomSelection(orderedListOfPublicKeys []string, numberOfActorsInSession int) []*coreTypes.Actor {
+	// IMPORTANT:
+	// THIS IS A DEMONSTRABLE FUNCTION THAT WILL NOT BE IMPLEMENTED AS SUCH
+	// IT EXISTS IN THIS COMMIT PURELY TO COMMUNICATE THE EXPECTED BEHAVIOR
+	return nil
+}
+
+func (s *session) GetServiceNodes() []*coreTypes.Actor {
+	return s.serviceNodes
+}
+
+func (s *session) GetFishermen() []*coreTypes.Actor {
+	return s.fishermen
+}
+
+func (s *session) GetApplication() *coreTypes.Actor {
+	return s.application
+}
+
+func (s *session) GetRelayChain() RelayChain {
+	return s.relayChain
+}
+
+func (s *session) GetGeoZone() GeoZone {
+	return s.geoZone
+}
+
+func (s *session) GetSessionHeight() int64 {
+	return s.sessionHeight
+}
+
+func concat(b ...[]byte) (result []byte) {
+	for _, bz := range b {
+		result = append(result, bz...)
+	}
+	return result
+}
